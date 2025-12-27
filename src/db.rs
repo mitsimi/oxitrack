@@ -37,6 +37,7 @@ impl DbPool {
                 id INTEGER PRIMARY KEY,
                 project_handle TEXT NOT NULL,
                 start_time INTEGER NOT NULL,
+                end_time INTEGER,
                 last_heartbeat INTEGER NOT NULL,
                 UNIQUE(project_handle, start_time) ON CONFLICT REPLACE
             )",
@@ -47,7 +48,7 @@ impl DbPool {
         Ok(())
     }
 
-    pub async fn update_session(self, project_handle: &str, timestamp: i64) -> Result<(i64, i64)> {
+    pub async fn update_session(&self, project_handle: &str, timestamp: i64) -> Result<(i64, i64)> {
         let five_minutes_ago = timestamp - (5 * 60);
 
         let tx = self.0.begin().await?;
@@ -73,6 +74,8 @@ impl DbPool {
                 Ok((s.id, timestamp - s.start_time))
             }
             None => {
+                self.close_stale_session(project_handle).await?;
+
                 let result = sqlx::query(
                     "INSERT INTO sessions (project_handle, start_time, last_heartbeat) VALUES (?, ?, ?)",
                 )
@@ -89,5 +92,17 @@ impl DbPool {
         tx.commit().await?;
 
         session
+    }
+
+    async fn close_stale_session(&self, project_handle: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE sessions SET end_time = last_heartbeat
+            WHERE project_handle = ? AND end_time IS NULL",
+        )
+        .bind(project_handle)
+        .execute(&self.0)
+        .await?;
+
+        Ok(())
     }
 }
