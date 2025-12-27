@@ -1,10 +1,10 @@
+mod db;
+
 use axum::{Json, Router, extract::State, routing::post};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::db::DbPool;
-
-mod db;
 
 const PORT: u16 = 3000;
 
