@@ -1,81 +1,63 @@
+mod config;
 mod db;
+mod handlers;
 
-use axum::{Json, Router, extract::State, routing::post};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-
-use crate::db::DbPool;
-
-const PORT: u16 = 3000;
+use crate::config::Config;
+use crate::handlers::heartbeat;
+use axum::Router;
+use axum::routing::post;
+use tower_http::trace::TraceLayer;
 
 #[tokio::main]
 async fn main() {
-    let db = match DbPool::new("oxitrack.db").await {
-        Ok(db) => db,
-        Err(err) => {
-            eprintln!("Failed to initialize database: {}", err);
-            std::process::exit(1);
-        }
-    };
+    tracing_subscriber::fmt::init();
+    let config = Config::from_env();
 
-    let app = Router::new().route("/beat", post(heartbeat)).with_state(db);
-
-    // run our app with hyper, listening globally on port 3000
-    let listener = match tokio::net::TcpListener::bind(format!("127.0.0.1:{}", PORT)).await {
-        Ok(listener) => listener,
-        Err(err) => {
-            eprintln!("Failed to bind to port {}: {}", PORT, err);
-            std::process::exit(1);
-        }
-    };
-
-    println!("Listening on http://localhost:{}", PORT);
-    match axum::serve(listener, app).await {
-        Ok(_) => (),
-        Err(err) => {
-            eprintln!("Failed to serve: {}", err);
-            std::process::exit(1);
-        }
-    };
-}
-
-#[derive(Debug, Deserialize)]
-struct HeartbeatRequest {
-    project_handle: String,
-    timestamp: i64,
-}
-
-#[derive(Debug, Serialize)]
-struct HeartbeatResponse {
-    session_id: i64,
-    project_handle: String,
-    duration_seconds: i64,
-}
-
-async fn heartbeat(
-    State(db): State<DbPool>,
-    Json(request): Json<HeartbeatRequest>,
-) -> Result<Json<HeartbeatResponse>, Json<Value>> {
-    println!("received heartbeat for {}", request.project_handle);
-
-    if request.project_handle.len() > 100 {
-        eprintln!("project handle exeeds 100 character limit");
-        return Err(Json(json!({
-            "error": "project_handle exceeds 100 character limit"
-        })));
-    }
-
-    match db
-        .update_session(&request.project_handle, request.timestamp)
+    let pool = db::create_pool(config.database_url())
         .await
-    {
-        Ok((row_id, time)) => Ok(Json(HeartbeatResponse {
-            session_id: row_id,
-            project_handle: request.project_handle,
-            duration_seconds: time,
-        })),
-        Err(err) => Err(Json(json!({
-            "error": err.to_string()
-        }))),
+        .expect("Failed to create database pool");
+    db::run_migrations(&pool)
+        .await
+        .expect("Failed to run migrations");
+
+    let app = Router::new()
+        .route("/beat", post(heartbeat::beat))
+        .layer(TraceLayer::new_for_http())
+        .with_state(pool);
+
+    let addr = format!("0.0.0.0:{}", config.port());
+    tracing::info!("Server running on http://{}", addr);
+
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .expect("Failed to bind address");
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("Server error");
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("Received Ctrl+C, shutting down"),
+        _ = terminate => tracing::info!("Received SIGTERM, shutting down"),
     }
 }
