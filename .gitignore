@@ -1,1 +1,20 @@
-/target
+# Rust build artifacts
+target/
+
+# Cargo lock (uncomment if creating a library)
+# Cargo.lock
+
+# Editor/IDE files
+.idea/
+.vscode/
+*.swp
+*~
+
+# macOS
+.DS_Store
+
+# Rustfmt backups
+*.rs.bk
+
+temp/
+data/
